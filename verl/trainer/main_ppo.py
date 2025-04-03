@@ -17,13 +17,15 @@ Note that we don't combine the main with ray_trainer as ray_trainer is used by o
 
 from verl import DataProto
 import torch
-from verl.utils.reward_score import gsm8k, math, multiply, countdown, kk, tsp20
+from verl.utils.reward_score import gsm8k, math, multiply, countdown, kk, tsp20, hgs
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 
 
 def _select_rm_score_fn(data_source):
     if data_source == 'openai/gsm8k':
         return gsm8k.compute_score
+    elif data_source == 'vrp_instances': #hgs
+        return hgs.compute_score
     elif data_source == 'tsp20':
         # print("tsp_20")
         return tsp20.compute_score
@@ -74,7 +76,14 @@ class RewardManager():
 
             # decode
             sequences = torch.cat((valid_prompt_ids, valid_response_ids))
-            sequences_str = self.tokenizer.decode(sequences)
+            # sequences_str = self.tokenizer.decode(sequences)
+
+            # decode only the response part
+            sequences_str = self.tokenizer.decode(valid_response_ids)
+
+            # if i % 1000 == 0:
+            #     print(80, "main_ppo.py", i, sequences_str)
+            ### return
 
             ground_truth = data_item.non_tensor_batch['reward_model']['ground_truth']
 
@@ -82,7 +91,15 @@ class RewardManager():
             data_source = data_item.non_tensor_batch['data_source']
             compute_score_fn = _select_rm_score_fn(data_source)
 
-            if data_source == 'tsp20':
+            if data_source == 'vrp_instances':
+                instance_path = data_item.non_tensor_batch['reward_model']['ground_truth']['instance_path']
+                baseline_cost = data_item.non_tensor_batch['reward_model']['ground_truth']['baseline_cost']
+                score = compute_score_fn(solution_str=sequences_str, instance_path=instance_path, baseline_cost=baseline_cost)
+
+                if i % 1000 == 0:
+                    print(80, "main_ppo.py", i, score, "\n", sequences_str)
+
+            elif data_source == 'tsp20':
                 num_cities = data_item.non_tensor_batch['extra_info']['num_cities']
                 distance_matrix = data_item.non_tensor_batch['extra_info']['distance_matrix']
                 # print(num_cities, type(distance_matrix))
