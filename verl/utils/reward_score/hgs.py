@@ -11,13 +11,15 @@ class HGSEvaluator:
     def __init__(self, data_path: str, baseline_cost: int):
 
         # Load test instance (replace with your VRP file)
-        self.data = read(data_path)
+        relative_path = data_path.split("tsp_100_instances/", 1)[-1]
+        new_path = f"/opt/tiger/verl_code_ai_utils/VRP-RL/data/tsp/{relative_path}"
+        self.data = read(new_path)
         self.baseline_cost = baseline_cost
         
     def evaluate(self, code: str) -> Dict[str, Any]:
         """Evaluate generated code using PyVRP's built-in validation"""
         try:
-            selector_path = Path("/common/home/users/m/manujm/PyVRP/llm_components/llm_parent_selector.py")
+            selector_path = Path("/opt/tiger/verl_code_ai_utils/PyVRP/llm_components/llm_parent_selector.py")
             selector_path.write_text(code)
             # Configure solver with LLM integration
             params = SolveParams(
