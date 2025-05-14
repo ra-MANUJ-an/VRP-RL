@@ -1,17 +1,20 @@
 set -x
+
+export WANDB_API_KEY="9de25c4a8eed15d718cdf323a46ba18ad28aebb7"
+
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
-    data.train_files=$HOME/neuralcombinatorialoptimization/rl_llm_metaheuristics/processed_tsp_100_data_survivor/train.parquet \
-    data.val_files=$HOME/neuralcombinatorialoptimization/rl_llm_metaheuristics/processed_tsp_100_data_survivor/test.parquet \
-    data.train_batch_size=4 \
+    data.train_files=/mnt/hdfs/zhangcong/tsp/train_20250509.parquet \
+    data.val_files=/mnt/hdfs/zhangcong/tsp/test_20250509.parquet \
+    data.train_batch_size=32 \
     data.val_batch_size=4 \
-    data.max_prompt_length=5500 \
-    data.max_response_length=1500 \
-    actor_rollout_ref.model.path=$HOME/models/Qwen2.5-Coder-0.5B-Instruct\
+    data.max_prompt_length=2048 \
+    data.max_response_length=1024 \
+    actor_rollout_ref.model.path=/mnt/hdfs/codeai/hf_models/Qwen2.5-Coder-7B-Instruct\
     actor_rollout_ref.actor.optim.lr=3e-7 \
     actor_rollout_ref.model.use_remove_padding=True \
-    actor_rollout_ref.actor.ppo_mini_batch_size=2 \
-    actor_rollout_ref.actor.ppo_micro_batch_size=2 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=8 \
+    actor_rollout_ref.actor.ppo_micro_batch_size=8 \
     actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
@@ -28,13 +31,13 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
     algorithm.kl_ctrl.kl_coef=0.001 \
     trainer.critic_warmup=0 \
-    trainer.logger=['wandb'] \
+    trainer.logger=['console','wandb'] \
     trainer.project_name='GRPO_HGS' \
-    trainer.experiment_name='Qwen2.5-Coder-0.5B-Instruct' \
-    trainer.n_gpus_per_node=2 \
+    trainer.experiment_name='Qwen2.5-Coder-7B-Instruct-20250514' \
+    trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
-    trainer.default_local_dir=$HOME/models/hgs-grpo-ckpts \
+    trainer.default_local_dir=/mnt/hdfs/zhangcong/CodeAI/verl_rl_checkpoints \
     trainer.default_hdfs_dir=null \
-    trainer.save_freq=4000 \
-    trainer.test_freq=1000 \
-    trainer.total_epochs=1 $@ 2>&1 | tee grpo.log
+    trainer.save_freq=-1 \
+    trainer.test_freq=20 \
+    trainer.total_epochs=1000 $@ 2>&1 | tee grpo.log

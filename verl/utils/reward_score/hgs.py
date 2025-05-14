@@ -21,20 +21,24 @@ def evaluate(
         baseline_cost
     ) -> Dict[str, Any]:
     """Evaluate generated code using PyVRP's built-in validation"""
+
+    relative_path = instance_path.split("tsp_100_instances/", 1)[-1]
+    new_path = f"/opt/tiger/verl_code_ai_utils/tsp_100_instances/{relative_path}"
+    instance = read(new_path)
+    baseline_cost = baseline_cost
+    selector_path = Path("/opt/tiger/verl_code_ai_utils/VRP-RL/PyVRP/llm_components/llm_parent_selector.py")
+
     try:
-        instance = read(instance_path)
-        selector_path = Path("/common/home/users/m/manujm/PyVRP/llm_components/llm_survivor_selector.py")
-        # selector_path = Path("/common/home/users/m/manujm/PyVRP/llm_components/llm_parent_selector.py")
         selector_path.write_text(solution_str)
 
-        params = SolveParams(
-            population=PopulationParams(min_pop_size=25),
-            custom_survivor_path=selector_path
-        )
         # params = SolveParams(
         #     population=PopulationParams(min_pop_size=25),
-        #     custom_selector_path=selector_path
+        #     custom_survivor_path=selector_path
         # )
+        params = SolveParams(
+            population=PopulationParams(min_pop_size=25),
+            custom_selector_path=selector_path
+        )
         llm_result = solve(
             instance,
             stop=MaxIterations(1000),
