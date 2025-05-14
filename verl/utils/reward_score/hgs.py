@@ -46,6 +46,7 @@ def evaluate(
             display=False
         )
         improvement = baseline_cost - llm_result.cost()
+        print(f"Improvement: {improvement}")
         return {
             "valid": True,
             "cost": llm_result.cost(),

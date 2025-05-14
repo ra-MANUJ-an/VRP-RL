@@ -1,5 +1,5 @@
 ```bash
-# Setup env
+# Setup env, ingore this part if you have already have an env that can run the code below
 cd /opt/tiger/verl_code_ai_utils
 bash setup.sh
 git clone --branch zhangcong_devrp git@github.com:SivilTaram/verl.git
@@ -16,15 +16,9 @@ git clone --branch zhangcong_dev_based_on_munuj_0514  git@github.com:ra-MANUJ-an
 cd /opt/tiger/verl_code_ai_utils/VRP-RL/PyVRP
 pip install -e . -U
 
-export PROJECT_NAME=GRPO_HGS
-export RUN_NAME=$(date '+%m%d')
+# env var setup
 export WANDB_API_KEY="9de25c4a8eed15d718cdf323a46ba18ad28aebb7"
 export WANDB_OFFICIAL=1
-export HDFS_DATA_PATH="/mnt/hdfs/zhangcong/"
-export HDFS_MODEL_PATH="/mnt/hdfs/codeai/hf_models"
-export HDFS_CHECKPOINT_PATH="/mnt/hdfs/zhangcong/CodeAI/verl_rl_checkpoints"
-export HDFS_LOG_PATH="/mnt/hdfs/zhangcong/CodeAI/verl_rl_logs"
-export MAX_RUNTIME_HOURS=0
 export VLLM_USE_V1=1
 
 # Train
