@@ -8,6 +8,7 @@ import random
 from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Callable, Generator, Optional
+from multiprocessing import Process, Queue
 
 from pyvrp._pyvrp import PopulationParams, SubPopulation
 
@@ -36,9 +37,11 @@ class Population:
         params: PopulationParams | None = None,
         custom_selector: Optional[Path] = None,
         custom_survivor: Optional[Path] = None,  # New parameter
+        selector_timeout: float = 30.0,
     ):
         self._op = diversity_op
         self._params = params if params is not None else PopulationParams()
+        self.selector_timeout = selector_timeout
 
         self._selector = self._default_selector
         if custom_selector:
@@ -64,7 +67,7 @@ class Population:
     #     return func
 
     def _load_custom_selector(self, path: Path) -> Callable:
-        module = self._safe_import(path)
+        module = self._safe_import_with_timeout(path)
         if not hasattr(module, "select_parents"):
             raise ValueError("LLM module must define 'select_parents'")
         func = module.select_parents
@@ -72,7 +75,7 @@ class Population:
         return func
 
     def _load_custom_survivor(self, path: Path) -> Callable:
-        module = self._safe_import(path)
+        module = self._safe_import_with_timeout(path)
         if not hasattr(module, "select_survivors"):
             raise ValueError("LLM module must define 'select_survivors'")
         func = module.select_survivors
@@ -133,49 +136,99 @@ class Population:
     #     import re
     #     match = re.search(r"```python(.*?)```", raw_code, re.DOTALL)
     #     return match.group(1).strip() if match else raw_code
-    
-    
-    def _safe_import(self, path: Path) -> ModuleType:
-        """Safely import module with restricted environment."""
-        raw_text = path.read_text()
-        code = self._extract_python_code(raw_text)  # Extract clean Python code
-    
-        # self._validate_ast(code)  # Validate cleaned code
-    
-        spec = importlib.util.spec_from_file_location("llm_module", path)
-        module = importlib.util.module_from_spec(spec)
-    
-        # restricted_globals = {
-        #     "__builtins__": {
-        #         "min": min,
-        #         "max": max,
-        #         "len": len,
-        #         "range": range,
-        #         "sorted": sorted,
-        #         "Exception": Exception,
-        #         "list": list,
-        #         "tuple": tuple,
-        #         "type": type,
-        #         "int": int,
-        #         "random": random,
-        #     },
-        #     "Solution": Solution,
-        #     "CostEvaluator": CostEvaluator,
-        #     "RandomNumberGenerator": RandomNumberGenerator,
-        # }
 
+    def _safe_import_with_timeout(
+        path: Path,
+        timeout: float = 30.0,
+        restricted_globals: dict | None = None,
+    ) -> ModuleType | None:
+        import multiprocessing
+        import tempfile
+        import importlib.util
+    
+        raw_text = path.read_text()
+        code = self._extract_python_code(raw_text)  # or pass as arg
+    
+        def worker(code_str: str, restricted_globals, queue):
+            try:
+                with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as tmp:
+                    tmp.write(code_str)
+                    tmp_path = tmp.name
+    
+                spec = importlib.util.spec_from_file_location("llm_module", tmp_path)
+                if spec is None or spec.loader is None:
+                    queue.put(("error", "Failed to load spec"))
+                    return
+    
+                module = importlib.util.module_from_spec(spec)
+    
+                # Inject restricted globals
+                if restricted_globals:
+                    module.__dict__.update(restricted_globals)
+    
+                spec.loader.exec_module(module)
+                queue.put(("ok", module))
+    
+            except Exception as e:
+                queue.put(("error", str(e)))
+    
+        queue = multiprocessing.Queue()
+    
+        # Create your restricted environment
         restricted_globals = {
-            "__builtins__": __builtins__,  # Allow standard Python builtins
+            "__builtins__": __builtins__,
             "Solution": Solution,
             "CostEvaluator": CostEvaluator,
             "RandomNumberGenerator": RandomNumberGenerator,
         }
     
-        module.__dict__.update(restricted_globals)
+        proc = multiprocessing.Process(
+            target=worker, args=(code, restricted_globals, queue)
+        )
+        proc.start()
+        proc.join(timeout)
     
-        # Instead of using spec.loader.exec_module(), run our extracted code
-        exec(compile(code, filename=str(path), mode="exec"), module.__dict__)
-        return module
+        if proc.is_alive():
+            proc.terminate()
+            proc.join()
+            print(f"[Population] Import timed out for {path}")
+            return None
+    
+        if queue.empty():
+            print(f"[Population] Import process crashed silently for {path}")
+            return None
+    
+        status, result = queue.get()
+        if status == "ok":
+            return result
+        else:
+            print(f"[Population] Import failed for {path}: {result}")
+            return None
+
+
+    
+    # def _safe_import(self, path: Path) -> ModuleType:
+    #     """Safely import module with restricted environment."""
+    #     raw_text = path.read_text()
+    #     code = self._extract_python_code(raw_text)  # Extract clean Python code
+    
+    #     # self._validate_ast(code)  # Validate cleaned code
+    
+    #     spec = importlib.util.spec_from_file_location("llm_module", path)
+    #     module = importlib.util.module_from_spec(spec)
+
+    #     restricted_globals = {
+    #         "__builtins__": __builtins__,  # Allow standard Python builtins
+    #         "Solution": Solution,
+    #         "CostEvaluator": CostEvaluator,
+    #         "RandomNumberGenerator": RandomNumberGenerator,
+    #     }
+    
+    #     module.__dict__.update(restricted_globals)
+    
+    #     # Instead of using spec.loader.exec_module(), run our extracted code
+    #     exec(compile(code, filename=str(path), mode="exec"), module.__dict__)
+    #     return module
 
     
     # def _safe_import(self, path: Path) -> ModuleType:
@@ -380,6 +433,20 @@ class Population:
         fittest = min(items, key=lambda item: item.fitness)
         return fittest.solution
 
+    def _run_selector_safe(
+        self,
+        population: list[Solution],
+        rng: RandomNumberGenerator,
+        cost_evaluator: CostEvaluator,
+        k: int,
+        queue: Queue
+    ):
+        try:
+            res = self._selector(population, rng, cost_evaluator, k)
+            queue.put((True, res))
+        except Exception as e:
+            queue.put((False, e))
+        
     def _default_selector(
         self, 
         rng: RandomNumberGenerator, 
@@ -434,4 +501,20 @@ class Population:
         
         # For LLM selector: combine feasible/infeasible populations
         population = list(self)
-        return self._selector(population, rng, cost_evaluator, k)
+        queue: Queue = Queue()
+        proc = Process(
+            target=self._run_selector_safe,
+            args=(population, rng, cost_evaluator, k, queue),
+        )
+        proc.start()
+        proc.join(self.selector_timeout)
+
+        if proc.is_alive():
+            proc.terminate()
+            return self._default_selector(rng, cost_evaluator, k)
+
+        success, result = queue.get() if not queue.empty() else (False, None)
+        if not success or not isinstance(result, tuple) or len(result) != 2:
+            return self._default_selector(rng, cost_evaluator, k)
+
+        return result
