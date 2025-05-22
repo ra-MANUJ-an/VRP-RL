@@ -157,10 +157,6 @@ class Population:
         timeout: float = 10.0,
         restricted_globals: dict | None = None,
     ) -> ModuleType | None:
-        import multiprocessing
-        import tempfile
-        import importlib.util
-    
         try:
             raw_text = path.read_text()
         except Exception as e:
@@ -169,40 +165,8 @@ class Population:
             
         code = self._extract_python_code(raw_text)
         
-        # First, validate the code in a separate process
-        def validate_worker(code_str: str, queue):
-            try:
-                # Try to compile the code to check for syntax errors
-                compile(code_str, '<string>', 'exec')
-                queue.put(("valid", True))
-            except Exception as e:
-                queue.put(("invalid", str(e)))
-        
-        queue = multiprocessing.Queue()
-        proc = multiprocessing.Process(target=validate_worker, args=(code, queue))
-        proc.start()
-        proc.join(timeout)
-        
-        if proc.is_alive():
-            proc.terminate()
-            proc.join()
-            print(f"[Population] Code validation timed out for {path}")
-            return None
-            
-        if queue.empty():
-            print(f"[Population] Code validation process crashed for {path}")
-            return None
-            
-        try:
-            status, result = queue.get()
-            if status != "valid":
-                print(f"[Population] Invalid code in {path}: {result}")
-                return None
-        except Exception as e:
-            print(f"[Population] Failed to get validation result: {e}")
-            return None
-        
-        # If validation passed, import the module directly (no multiprocessing)
+        # Import directly in the main process instead of using multiprocessing
+        # This avoids the pickle issue with module objects
         tmp_path = None
         try:
             # Create temporary file
