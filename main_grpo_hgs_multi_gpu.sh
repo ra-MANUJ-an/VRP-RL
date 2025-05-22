@@ -34,7 +34,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
     algorithm.kl_ctrl.kl_coef=0.001 \
     trainer.critic_warmup=0 \
-    trainer.logger=['console'] \
+    trainer.logger=['console','wandb'] \
     trainer.project_name=$PROJECT_NAME \
     trainer.experiment_name=$RUN_NAME \
     trainer.n_gpus_per_node=8 \
