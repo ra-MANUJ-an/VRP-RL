@@ -75,24 +75,32 @@ class Population:
         self._params = params if params is not None else PopulationParams()
         self.selector_timeout = selector_timeout
 
-        # Parent‐selection
+        # By default, use the built-in tournament selector
         self._selector = self._default_selector
         if custom_selector:
-            self._selector = self._load_custom_selector(custom_selector)
+            try:
+                self._selector = self._load_custom_selector(custom_selector)
+            except ValueError as e:
+                # Fail fast if the custom selector cannot be imported
+                raise ValueError(f"Failed to import custom selector: {e}")
 
-        # Survivor‐selection
+        # By default, no survivor logic (so we let C++ purge). If the user
+        # provided a path, try to load it—and fail fast on error.
         self._survivor_selector = None
         if custom_survivor:
-            self._survivor_selector = self._load_custom_survivor(custom_survivor)
+            try:
+                self._survivor_selector = self._load_custom_survivor(custom_survivor)
+            except ValueError as e:
+                raise ValueError(f"Failed to import custom survivor: {e}")
 
-        # Two subpopulations: feasible vs infeasible
+        # Two subpopulations, one for feasible, one for infeasible
         self._feas = SubPopulation(diversity_op, self._params)
         self._infeas = SubPopulation(diversity_op, self._params)
 
     def _load_custom_selector(self, path: Path) -> Callable:
         module = self._safe_import_with_timeout(path)
         if module is None:
-            raise ValueError(f"Failed to import selector module from {path}")
+            raise ValueError(f"Could not load module from {path}")
         if not hasattr(module, "select_parents"):
             raise ValueError("LLM selector module must define `select_parents`")
         func = module.select_parents
@@ -102,7 +110,7 @@ class Population:
     def _load_custom_survivor(self, path: Path) -> Callable:
         module = self._safe_import_with_timeout(path)
         if module is None:
-            raise ValueError(f"Failed to import survivor module from {path}")
+            raise ValueError(f"Could not load module from {path}")
         if not hasattr(module, "select_survivors"):
             raise ValueError("LLM survivor module must define `select_survivors`")
         func = module.select_survivors
@@ -118,16 +126,14 @@ class Population:
 
     def _extract_python_code(self, raw_code: str) -> str:
         """
-        Extract Python code from ```python ... ``` block and remove example usage.
-        Keeps only class/function definitions and top-level imports/assignments.
+        Extract Python code from ```python ... ``` blocks and drop everything else
+        except top‐level class/function definitions, imports, and assignments.
         """
         import re
 
-        # 1. If the file uses triple-backticks, pull out what's inside
         match = re.search(r"```python(.*?)```", raw_code, re.DOTALL)
         code = match.group(1).strip() if match else raw_code
 
-        # 2. Parse AST and only keep defs/imports/assigns
         tree = ast.parse(code)
         filtered_nodes = []
         for node in tree.body:
@@ -135,10 +141,10 @@ class Population:
                 filtered_nodes.append(node)
             elif isinstance(node, ast.Assign):
                 filtered_nodes.append(node)
-            # skip everything else (e.g. Expr(Call(...)), if __name__ == "__main__", etc.)
+            # drop everything else (e.g. if __name__ == "__main__", Expr(Call(...)), etc.)
 
         new_tree = ast.Module(body=filtered_nodes, type_ignores=[])
-        return ast.unparse(new_tree)  # requires Python 3.9+
+        return ast.unparse(new_tree)  # Python 3.9+ required
 
     def _safe_import_with_timeout(
         self,
@@ -147,24 +153,28 @@ class Population:
         restricted_globals: dict | None = None,
     ) -> ModuleType | None:
         """
-        1. Read the file
-        2. Extract only defs/imports with `_extract_python_code`
-        3. Spawn a short-lived process to `compile(...)` that snippet (timeout enforced)
-        4. If compile succeeds, write to a temp file and exec_module() it in the main process
+        1. Read the file at `path`.
+        2. Extract only the top‐level defs/imports/assigns via `_extract_python_code`.
+        3. Spawn a helper process to compile(...) that snippet—enforcing `timeout`.
+           If it times out or has syntax errors, return None.
+        4. If compile is valid, write to a temp file and then `exec_module(...)` it
+           in the main process. But before exec’ing, *temporarily* insert
+           `pyvrp._pyvrp` into `sys.modules['pyvrp']` so that “from pyvrp import X”
+           works correctly.
         """
         import multiprocessing
 
-        # Step A: read raw text
+        # Step A: Read the raw text
         try:
             raw_text = path.read_text()
         except Exception as e:
             print(f"[Population] Failed to read `{path}`: {e}")
             return None
 
-        # Step B: strip out only the top‐level defs/imports/assigns
+        # Step B: Filter out everything except top‐level defs/imports/assigns
         code = self._extract_python_code(raw_text)
 
-        # Step C: compile‐check in a worker
+        # Step C: Spawn a subprocess to do a syntax check via compile(...):
         def validate_worker(code_str: str, queue: Queue):
             try:
                 compile(code_str, "<string>", "exec")
@@ -184,18 +194,17 @@ class Population:
             return None
 
         if queue.empty():
-            print(f"[Population] Code validation crashed for `{path}`")
+            print(f"[Population] Code validation subprocess crashed for `{path}`")
             return None
 
         status, payload = queue.get()
         if status != "valid":
-            print(f"[Population] Invalid code in `{path}`: {payload}")
+            print(f"[Population] Syntax error in `{path}`: {payload}")
             return None
 
-        # Step D: write the filtered code to a temporary .py file and exec_module
+        # Step D: Write the filtered code to a temporary file and import it
         tmp_module_path = None
         try:
-            # Make a random name so that importing twice doesn't collide
             rand_suffix = random.randrange(0, 10**8)
             module_name = f"llm_module_{rand_suffix}"
             with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as tmp:
@@ -209,7 +218,7 @@ class Population:
 
             module = importlib.util.module_from_spec(spec)
 
-            # Build a safe‐ish global namespace
+            # Build a restricted global namespace if none provided
             if restricted_globals is None:
                 restricted_globals = {
                     "__builtins__": __builtins__,
@@ -235,17 +244,17 @@ class Population:
                     "all": all,
                     "enumerate": enumerate,
                     "zip": zip,
-                    "print": print,  # For debugging
-                    # Math/random
+                    "print": print,  # for debugging
+                    # math/random
                     "random": random,
                     "np": np,
                     "numpy": np,
-                    # Typing helpers
+                    # typing helpers
                     "Tuple": Tuple,
                     "Callable": Callable,
                     "Iterator": Iterator,
                     "overload": overload,
-                    # PyVRP core types
+                    # all core symbols from pyvrp._pyvrp
                     "CostEvaluator": CostEvaluator,
                     "DynamicBitset": DynamicBitset,
                     "Client": Client,
@@ -265,22 +274,33 @@ class Population:
                     "RandomNumberGenerator": RandomNumberGenerator,
                 }
 
-            # Inject restricted globals into the module namespace
+            # Inject these into the new module’s namespace
             for key, val in restricted_globals.items():
                 setattr(module, key, val)
 
-            # Finally, execute it
-            spec.loader.exec_module(module)
+            # *** TRICK: temporarily make "pyvrp" point to pyvrp._pyvrp ***
+            # so that user code like “from pyvrp import DistanceSegment” works.
+            prev_pyvrp = sys.modules.get("pyvrp")
+            try:
+                sys.modules["pyvrp"] = importlib.import_module("pyvrp._pyvrp")
+                spec.loader.exec_module(module)
+            finally:
+                # restore whatever was in sys.modules["pyvrp"] before
+                if prev_pyvrp is None:
+                    del sys.modules["pyvrp"]
+                else:
+                    sys.modules["pyvrp"] = prev_pyvrp
+
             return module
 
         except Exception as e:
             import traceback
 
             tb = traceback.format_exc()
-            print(f"[Population] Import failed for `{path}`: {e}\n{tb}")
+            print(f"[Population] Failed to import `{path}`: {e}\n{tb}")
             return None
+
         finally:
-            # Clean up the temp file
             if tmp_module_path and os.path.exists(tmp_module_path):
                 try:
                     os.unlink(tmp_module_path)
@@ -288,9 +308,6 @@ class Population:
                     pass
 
     def __iter__(self) -> Generator[Solution, None, None]:
-        """
-        Iterate over feasible solutions first, then infeasible ones.
-        """
         for item in self._feas:
             yield item.solution
         for item in self._infeas:
@@ -337,13 +354,13 @@ class Population:
         """
         subpop = self._feas if solution.is_feasible() else self._infeas
 
-        # Check overflow + custom_survivor
+        # If we have a custom survivor and the subpopulation is already full
         if self._survivor_selector and len(subpop) >= self._params.max_pop_size:
-            # 1. Gather current solutions + the new candidate
+            # 1. Gather existing solutions + the new candidate
             existing_solutions = [item.solution for item in subpop]
             candidates = existing_solutions + [solution]
 
-            # 2. Run the LLM in a subprocess with timeout
+            # 2. Run LLM code in a subprocess with timeout
             queue: Queue = Queue()
             proc = Process(
                 target=self._run_survivor_safe,
@@ -360,18 +377,16 @@ class Population:
                     f"Custom survivor selection timed out after {self.selector_timeout} seconds"
                 )
 
-            # 3. Determine whether we got a valid survivor list
             if queue.empty():
                 raise RuntimeError("Custom survivor selection process returned no output")
 
             success, payload = queue.get()
-            # Payload should be a list[Solution]
             if not success or not isinstance(payload, list):
                 raise RuntimeError(f"Custom survivor selection failed: {payload}")
 
             survivors = payload[: self._params.max_pop_size]
 
-            # 4. Rebuild subpopulation from survivors
+            # 3. Rebuild subpopulation from survivors
             new_subpop = SubPopulation(self._op, self._params)
             for sol in survivors:
                 new_subpop.add(sol, cost_evaluator)
@@ -382,7 +397,7 @@ class Population:
                 self._infeas = new_subpop
 
         else:
-            # Normal behavior: let SubPopulation<>::add handle it (but only if no overflow or no custom_survivor)
+            # Normal behavior: let SubPopulation<>::add handle it
             subpop.add(solution, cost_evaluator)
 
     def clear(self):
@@ -400,7 +415,7 @@ class Population:
 
     def _tournament(self, rng: RandomNumberGenerator, k: int) -> Solution:
         """
-        Perform a k-ary tournament. Raises if population is empty or k <= 0.
+        Perform a k-way tournament. Raises if population is empty or k <= 0.
         """
         if len(self) == 0:
             raise RuntimeError("Cannot perform tournament on empty population")
@@ -427,7 +442,7 @@ class Population:
         queue: Queue,
     ):
         """
-        Wrapped in a Process: call the LLM‐defined `select_parents(...)`. 
+        Wrapped in a Process: call the LLM-defined `select_parents(...)`.
         Send (True, (sol1, sol2)) or (False, error_msg).
         """
         import traceback
@@ -443,8 +458,7 @@ class Population:
         self, rng: RandomNumberGenerator, cost_evaluator: CostEvaluator, k: int = 2
     ) -> tuple[Solution, Solution]:
         """
-        Exactly what PyVRP used to do: two successive tournaments, then
-        enforce diversity by re‐drawing the second parent if necessary.
+        Exactly what PyVRP used to do: two successive tournaments, then enforce diversity.
         """
         self._update_fitness(cost_evaluator)
         first = self._tournament(rng, k)
