@@ -69,7 +69,7 @@ class Population:
         params: PopulationParams | None = None,
         custom_selector: Optional[Path] = None,
         custom_survivor: Optional[Path] = None,
-        selector_timeout: float = 10.0,
+        selector_timeout: float = 5.0,
     ):
         self._op = diversity_op
         self._params = params if params is not None else PopulationParams()
@@ -356,6 +356,7 @@ class Population:
 
         # If we have a custom survivor and the subpopulation is already full
         if self._survivor_selector and len(subpop) >= self._params.max_pop_size:
+            # print("Custom Survivor")
             # 1. Gather existing solutions + the new candidate
             existing_solutions = [item.solution for item in subpop]
             candidates = existing_solutions + [solution]
@@ -395,8 +396,10 @@ class Population:
                 self._feas = new_subpop
             else:
                 self._infeas = new_subpop
-
+            
+            # print("No need of Default Survivor")
         else:
+            # print("Default Survivor")
             # Normal behavior: let SubPopulation<>::add handle it
             subpop.add(solution, cost_evaluator)
 
@@ -496,13 +499,19 @@ class Population:
         proc = Process(
             target=self._run_selector_safe,
             args=(population_list, rng, cost_evaluator, k, queue),
+            daemon=True  # Add this
         )
         proc.start()
         proc.join(self.selector_timeout)
 
         if proc.is_alive():
+            print(f"[Population] Custom selector timed out, terminating subprocess...")
             proc.terminate()
-            proc.join()
+            proc.join(timeout=5.0)
+            if proc.is_alive():
+                print(f"[Population] Force killing subprocess...")
+                proc.kill()  # More aggressive
+                proc.join()
             raise RuntimeError(f"Custom selector timed out after {self.selector_timeout} seconds")
 
         if queue.empty():
